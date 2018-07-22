@@ -23,7 +23,7 @@ namespace WDBXEditor.Reader.FileTypes
 
 		public List<ColumnStructureEntry> ColumnMeta;
 		public RelationShipData RelationShipData;
-		public Dictionary<int, MinMax> MinMaxValues;
+		//public Dictionary<int, MinMax> MinMaxValues;
 
 		protected int[] columnSizes;
 		protected byte[] recordData;
@@ -62,6 +62,8 @@ namespace WDBXEditor.Reader.FileTypes
 
 			recordData = dbReader.ReadBytes((int)(RecordCount * RecordSize));
 			Array.Resize(ref recordData, recordData.Length + 8);
+
+			Flags &= ~HeaderFlags.RelationshipData; // appears to be obsolete now
 		}
 
 		public new Dictionary<int, byte[]> ReadOffsetData(BinaryReader dbReader, long pos)
@@ -259,6 +261,7 @@ namespace WDBXEditor.Reader.FileTypes
 						int bitWidth = ColumnMeta[f].BitWidth;
 						int cardinality = ColumnMeta[f].Cardinality;
 						uint palletIndex;
+						int take = columnSizes[c] * ColumnMeta[f].ArraySize;
 
 						switch (ColumnMeta[f].CompressionType)
 						{
@@ -269,47 +272,46 @@ namespace WDBXEditor.Reader.FileTypes
 									idOffset = data.Count;
 									id = bitStream.ReadInt32(bitSize); // always read Ids as ints
 									data.AddRange(BitConverter.GetBytes(id));
-									c++;
 								}
 								else
 								{
-									for (int x = 0; x < ColumnMeta[f].ArraySize; x++)
-										data.AddRange(bitStream.ReadBytes(bitSize, false, columnSizes[c++]));
+									data.AddRange(bitStream.ReadBytes(bitSize * ColumnMeta[f].ArraySize, false, take));
 								}
 								break;
 
 							case CompressionType.Immediate:
+							case CompressionType.SignedImmediate:
 								if (!HasIndexTable && f == IdIndex)
 								{
 									idOffset = data.Count;
 									id = bitStream.ReadInt32(bitWidth); // always read Ids as ints
 									data.AddRange(BitConverter.GetBytes(id));
-									c++;
 								}
 								else
 								{
-									data.AddRange(bitStream.ReadBytes(bitWidth, false, columnSizes[c++]));
+									data.AddRange(bitStream.ReadBytes(bitWidth, false, take));
 								}
 								break;
 
 							case CompressionType.Sparse:
 								if (ColumnMeta[f].SparseValues.TryGetValue(id, out byte[] valBytes))
-									data.AddRange(valBytes.Take(columnSizes[c++]));
+									data.AddRange(valBytes.Take(take));
 								else
-									data.AddRange(BitConverter.GetBytes(ColumnMeta[f].BitOffset).Take(columnSizes[c++]));
+									data.AddRange(BitConverter.GetBytes(ColumnMeta[f].BitOffset).Take(take));
 								break;
 
 							case CompressionType.Pallet:
 							case CompressionType.PalletArray:
 								palletIndex = bitStream.ReadUInt32(bitWidth);
-								data.AddRange(ColumnMeta[f].PalletValues[(int)palletIndex]);
-								c++;
+								data.AddRange(ColumnMeta[f].PalletValues[(int)palletIndex].Take(take));
 								break;
 
 							default:
 								throw new Exception($"Unknown compression {ColumnMeta[f].CompressionType}");
 
 						}
+
+						c += ColumnMeta[f].ArraySize;
 					}
 
 					// append relationship id
@@ -393,63 +395,6 @@ namespace WDBXEditor.Reader.FileTypes
 			columnSizes = entry.Data.Columns.Cast<DataColumn>().Select(x => typeLookup[Type.GetTypeCode(x.DataType)]).ToArray();
 		}
 
-		public void SetColumnMinMaxValues(DBEntry entry)
-		{
-			MinMaxValues = new Dictionary<int, MinMax>();
-			int column = 0;
-			for (int i = 0; i < ColumnMeta.Count; i++)
-			{
-				// get the column type - skip strings
-				var type = entry.Data.Columns[column].DataType;
-				if (type == typeof(string))
-				{
-					column += ColumnMeta[i].ArraySize;
-					continue;
-				}
-
-				int bits = ColumnMeta[i].CompressionType == CompressionType.None ? FieldStructure[i].BitCount : ColumnMeta[i].BitWidth;
-				if ((bits & (bits - 1)) == 0 && bits >= 8) // power of two and >= sizeof(byte) means a standard type
-				{
-					column += ColumnMeta[i].ArraySize;
-					continue;
-				}
-
-				// calculate the min and max values
-				bool signed = Convert.ToBoolean(type.GetField("MinValue").GetValue(null));
-				bool isfloat = type == typeof(float);
-
-				//bool metaSigned = ColumnMeta[i].CompressionType == CompressionType.Immediate && (ColumnMeta[i].Cardinality & 1) == 1;
-				//if (ColumnMeta[i].CompressionType == CompressionType.Immediate && metaSigned != signed && i != IdIndex && !isfloat)
-				//	throw new Exception($"Invalid sign for column {i}");
-
-				object max = signed ? long.MaxValue >> (64 - bits) : (object)(ulong.MaxValue >> (64 - bits));
-				object min = signed ? long.MinValue >> (64 - bits) : 0;
-				if (isfloat)
-				{
-					max = BitConverter.ToSingle(BitConverter.GetBytes((dynamic)max), 0);
-					min = BitConverter.ToSingle(BitConverter.GetBytes((dynamic)min), 0);
-				}
-
-				for (int j = 0; j < ColumnMeta[i].ArraySize; j++)
-				{
-					entry.Data.Columns[column].ExtendedProperties.Add("MaxValue", max);
-					if (signed || isfloat)
-						entry.Data.Columns[column].ExtendedProperties.Add("MinValue", min);
-
-					MinMax minmax = new MinMax()
-					{
-						Signed = signed,
-						MaxVal = max,
-						MinVal = min,
-						IsSingle = isfloat
-					};
-
-					MinMaxValues[column] = minmax;
-					column++;
-				}
-			}
-		}
-
 		public void AddRelationshipColumn(DBEntry entry)
 		{
 			if (RelationShipData == null)
@@ -470,6 +415,9 @@ namespace WDBXEditor.Reader.FileTypes
 		{
 			Tuple<int, int> minmax = entry.MinMax();
 			bw.BaseStream.Position = 0;
+
+			// fix the bitlimits
+			RemoveBitLimits();
 
 			WriteBaseHeader(bw, entry);
 
@@ -514,23 +462,27 @@ namespace WDBXEditor.Reader.FileTypes
 
 		public virtual void WriteData(BinaryWriter bw, DBEntry entry)
 		{
-			List<Tuple<int, short>> offsetMap = new List<Tuple<int, short>>();
-			StringTable stringTable = new StringTable(true);
-			bool IsSparse = HasIndexTable && HasOffsetTable;
-			Dictionary<int, List<int>> copyRecords = new Dictionary<int, List<int>>();
-			List<int> copyIds = new List<int>();
+			var offsetMap = new List<Tuple<int, short>>();
+			var stringTable = new StringTable(true);
+			var IsSparse = HasIndexTable && HasOffsetTable;
+			var copyRecords = new Dictionary<int, IEnumerable<int>>();
+			var copyIds = new HashSet<int>();
 
 			long pos = bw.BaseStream.Position;
 
 			// get a list of identical records			
 			if (CopyTableSize > 0)
 			{
+				var copyids = Enumerable.Empty<int>();
 				var copies = entry.GetCopyRows();
 				foreach (var c in copies)
 				{
-					copyRecords.Add(c.First(), c.Skip(1).ToList());
-					copyIds.AddRange(c.Skip(1));
+					int id = c.First();
+					copyRecords.Add(id, c.Skip(1).ToList());
+					copyids = copyids.Concat(copyRecords[id]);
 				}
+
+				copyIds = new HashSet<int>(copyids);
 			}
 
 			// get relationship data
@@ -580,12 +532,7 @@ namespace WDBXEditor.Reader.FileTypes
 				Queue<object> rowData = new Queue<object>(entry.Data.Rows[rowIndex].ItemArray);
 
 				int id = entry.Data.Rows[rowIndex].Field<int>(entry.Key);
-
-				if (CopyTableSize > 0) // skip copy records
-				{
-					if (copyIds.Contains(id))
-						continue;
-				}
+				bool isCopyRecord = copyIds.Contains(id);
 
 				if (HasIndexTable) // dump the id from the row data
 					rowData.Dequeue();
@@ -606,7 +553,12 @@ namespace WDBXEditor.Reader.FileTypes
 					if (data.Length == 0)
 						continue;
 
-					switch (ColumnMeta[fieldIndex].CompressionType)
+					CompressionType compression = ColumnMeta[fieldIndex].CompressionType;
+
+					if (isCopyRecord && compression != CompressionType.Sparse) // copy records still store the sparse data
+						continue;
+
+					switch (compression)
 					{
 						case CompressionType.None:
 							for (int i = 0; i < arraySize; i++)
@@ -614,6 +566,7 @@ namespace WDBXEditor.Reader.FileTypes
 							break;
 
 						case CompressionType.Immediate:
+						case CompressionType.SignedImmediate:
 							bitStream.WriteBits(data[0], bitWidth);
 							break;
 
@@ -648,6 +601,9 @@ namespace WDBXEditor.Reader.FileTypes
 
 					}
 				}
+
+				if (isCopyRecord)
+					continue; // copy records aren't real rows so skip the padding
 
 				bitStream.SeekNextOffset();
 				short size = (short)(pos + bitStream.Offset - offset);
@@ -829,6 +785,43 @@ namespace WDBXEditor.Reader.FileTypes
 
 		#endregion
 
+
+		protected void RemoveBitLimits()
+		{
+			if (HasOffsetTable)
+				return;
+
+			int c = HasIndexTable ? 1 : 0;
+			int cm = ColumnMeta.Count - (RelationShipData != null ? 1 : 0);
+
+			var skipType = new HashSet<CompressionType>(new[] { CompressionType.None, CompressionType.Sparse });
+
+			for (int i = c; i < cm; i++)
+			{
+				var col = ColumnMeta[i];
+				var type = col.CompressionType;
+				int oldsize = col.BitWidth;
+				ushort newsize = (ushort)(columnSizes[c] * 8);
+
+				c += col.ArraySize;
+
+				if (skipType.Contains(col.CompressionType) || newsize == oldsize)
+					continue;
+
+				col.BitWidth = col.Size = newsize;
+
+				for (int x = i + 1; x < cm; x++)
+				{
+					if (skipType.Contains(ColumnMeta[x].CompressionType))
+						continue;
+
+					ColumnMeta[x].RecordOffset += (ushort)(newsize - oldsize);
+					ColumnMeta[x].BitOffset = ColumnMeta[x].RecordOffset - (PackedDataOffset * 8);
+				}
+			}
+
+			RecordSize = (uint)((ColumnMeta.Sum(x => x.Size) + 7) / 8);
+		}
 	}
 
 	public class MinMax

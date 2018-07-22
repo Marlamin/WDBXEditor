@@ -14,7 +14,7 @@ namespace WDBXEditor.Reader
 		private int bit;
 		private Stream stream;
 		private Encoding encoding = Encoding.UTF8;
-		private bool canWrite = true;
+		private readonly bool canWrite = true;
 
 		public long Length => stream.Length;
 		public int BitPosition => bit;
@@ -177,7 +177,7 @@ namespace WDBXEditor.Reader
 			if (isBytes)
 				length *= 8;
 
-			byteLength = (byteLength == 0 ? length / 8 : byteLength);
+			byteLength = (byteLength == 0 ? (length + 7) / 8 : byteLength);
 
 			byte[] data = new byte[byteLength];
 			for (long i = 0; i < length;)

@@ -125,7 +125,7 @@ namespace WDBXEditor.Reader
 					using (BinaryReader dataReader = new BinaryReader(ms, Encoding.UTF8))
 					{
 						wdc1.AddRelationshipColumn(entry);
-						wdc1.SetColumnMinMaxValues(entry);
+						//wdc1.SetColumnMinMaxValues(entry);
 						ReadIntoTable(ref entry, dataReader, StringTable);
 					}
 
@@ -486,7 +486,7 @@ namespace WDBXEditor.Reader
 					OffsetMap.Add(new Tuple<int, short>((int)offset, (short)(bw.BaseStream.Position - offset)));
 
 				//WDB5 + OffsetMap without SecondIndex for the last row pads to next mod 4
-				if (entry.Header.IsTypeOf<WDB5>() && entry.Header.HasOffsetTable && !entry.Header.HasSecondIndex && row == lastrow)
+				if (entry.Header.IsTypeOf<WDB5>() && entry.Header.HasOffsetTable && !entry.Header.HasRelationshipData && row == lastrow)
 				{
 					long rem = bw.BaseStream.Position % 4;
 					bw.BaseStream.Position += (rem == 0 ? 0 : (4 - rem));

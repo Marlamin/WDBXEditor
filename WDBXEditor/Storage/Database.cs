@@ -183,7 +183,7 @@ namespace WDBXEditor.Storage
 			if(errors.Count > 0)
 			{
 				new ErrorReport(errors).ShowDialog(FormHandler.GetForm<Main>());
-			}				
+			}
 
 			//await Task.Factory.StartNew(() =>
 			//{
@@ -199,8 +199,8 @@ namespace WDBXEditor.Storage
             GC.WaitForFullGCComplete();
 
 #if DEBUG
-            Debug.WriteLine((GC.GetTotalMemory(false) / 1024 / 1024).ToString() + "mb");
+			Debug.WriteLine((GC.GetTotalMemory(false) / 1024 / 1024).ToString() + "mb");
 #endif
-        }
-    }
+		}
+	}
 }
