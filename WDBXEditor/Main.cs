@@ -66,7 +66,7 @@ namespace WDBXEditor
 
 
 			//Load definitions + Start FileWatcher
-			Task.Run(Database.LoadDefinitions)
+			Task.Run((Action)Database.LoadDefinitions)
 				.ContinueWith(x =>
 				{
 					// Check for Update, enable watcher after completion
